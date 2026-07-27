@@ -3,7 +3,7 @@ import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { MuPdfEngine } from '../../src/pdf/engine';
 
-const fixture = path.resolve(process.cwd(), '..', 'pdf-edit', 'samples', 'Generated', 'editable-embedded-font.pdf');
+const fixture = path.resolve(process.cwd(), 'public', 'samples', 'editable-embedded-font.pdf');
 
 describe('MuPDF Phase 0 engine', () => {
   it('opens, searches, renders, rewrites, saves, and reopens the fixture', async () => {
