@@ -1,11 +1,11 @@
 import * as mupdf from 'mupdf';
-import { moveTextInContentStreams, replaceTextInContentStream, replaceTextInContentStreamWithFont } from './content-stream/rewriter';
+import { moveTextInContentStreamsBatch, replaceTextInContentStream, replaceTextInContentStreamWithFont } from './content-stream/rewriter';
 import { resolveOnlineFont } from './online-font-resolver';
 import { groupStructuredTextLine, type StructuredTextChar, type StructuredTextRun } from './text-runs';
 import { buildFontEncodingMaps } from './font-encoding';
 import type {
   ContentStreamDelta, PdfDocumentInfo, PdfPageInfo, RenderedPage, SearchHit, SignatureDelta,
-  SignaturePlacement, TextEditRequest, TextEditResult, TextMoveRequest, TextMoveResult, TextRun,
+  SignaturePlacement, TextEditRequest, TextEditResult, TextMoveRequest, TextMoveResult, TextMovesRequest, TextRun,
 } from '../domain/pdf-models';
 
 type PdfDocument = mupdf.PDFDocument;
@@ -281,12 +281,22 @@ export class MuPdfEngine {
   }
 
   moveText(request: TextMoveRequest): TextMoveResult {
+    return this.moveTexts({
+      page: request.page,
+      moves: [{ originalText: request.originalText, occurrenceIndex: request.occurrenceIndex }],
+      deltaX: request.deltaX,
+      deltaY: request.deltaY,
+      allowInvalidateDigitalSignatures: request.allowInvalidateDigitalSignatures,
+    });
+  }
+
+  moveTexts(request: TextMovesRequest): TextMoveResult {
     this.checkMutation(request.allowInvalidateDigitalSignatures);
     const page = this.pdf.loadPage(request.page);
     const encodings = buildFontEncodingMaps(page);
     const streams = streamObjects(page).filter((stream) => stream.isStream());
     const before = streams.map((stream) => new Uint8Array(stream.readStream().asUint8Array()));
-    const result = moveTextInContentStreams(before, request.originalText, request.deltaX, request.deltaY, Math.max(0, request.occurrenceIndex ?? 0), encodings);
+    const result = moveTextInContentStreamsBatch(before, request.moves, request.deltaX, request.deltaY, encodings);
     if (!result.success) throw error('TEXT_NOT_FOUND', 'The selected text cluster could not be located in the page content streams.');
 
     const deltas: ContentStreamDelta[] = [];

@@ -1,4 +1,4 @@
-import type { ContentStreamDelta, PdfDocumentInfo, PdfEngineErrorShape, PdfPageInfo, RenderedPage, SearchHit, SignatureDelta, SignaturePlacement, TextEditRequest, TextEditResult, TextMoveRequest, TextMoveResult, TextRun } from '../domain/pdf-models';
+import type { ContentStreamDelta, PdfDocumentInfo, PdfEngineErrorShape, PdfPageInfo, RenderedPage, SearchHit, SignatureDelta, SignaturePlacement, TextEditRequest, TextEditResult, TextMoveRequest, TextMoveResult, TextMovesRequest, TextRun } from '../domain/pdf-models';
 
 export type WorkerRequest =
   | { id: number; type: 'open'; bytes: ArrayBuffer; password?: string }
@@ -8,6 +8,7 @@ export type WorkerRequest =
   | { id: number; type: 'search'; query: string }
   | { id: number; type: 'editText'; request: TextEditRequest }
   | { id: number; type: 'moveText'; request: TextMoveRequest }
+  | { id: number; type: 'moveTexts'; request: TextMovesRequest }
   | { id: number; type: 'applyContentDelta'; delta: ContentStreamDelta; useAfter: boolean }
   | { id: number; type: 'inspectSignatures'; page: number }
   | { id: number; type: 'addSignature'; placement: SignaturePlacement }

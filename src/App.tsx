@@ -272,22 +272,21 @@ export default function App() {
     setBusy(true);
     const actions: HistoryAction[] = [];
     try {
-      for (const target of targets) {
-        if (target.kind === 'text') {
-          const result = await client.moveText({
-            page,
-            originalText: target.run.text,
-            occurrenceIndex: occurrenceForRun(textRuns, target.run),
-            deltaX,
-            deltaY: -deltaY,
-            allowInvalidateDigitalSignatures: allow,
-          });
-          for (const delta of result.deltas ?? (result.delta ? [result.delta] : [])) actions.push({ kind: 'content', delta });
-        } else {
-          const before = { ...target.signature, placement: { ...target.signature.placement, allowInvalidateDigitalSignatures: allow } };
-          const after = await client.moveSignature(before, deltaX, deltaY, allow);
-          actions.push({ kind: 'signature-move', before, after });
-        }
+      const textTargets = targets.filter((target): target is Extract<MoveTarget, { kind: 'text' }> => target.kind === 'text');
+      if (textTargets.length) {
+        const result = await client.moveTexts({
+          page,
+          moves: textTargets.map((target) => ({ originalText: target.run.text, occurrenceIndex: occurrenceForRun(textRuns, target.run) })),
+          deltaX,
+          deltaY: -deltaY,
+          allowInvalidateDigitalSignatures: allow,
+        });
+        for (const delta of result.deltas ?? (result.delta ? [result.delta] : [])) actions.push({ kind: 'content', delta });
+      }
+      for (const target of targets.filter((item): item is Extract<MoveTarget, { kind: 'signature' }> => item.kind === 'signature')) {
+        const before = { ...target.signature, placement: { ...target.signature.placement, allowInvalidateDigitalSignatures: allow } };
+        const after = await client.moveSignature(before, deltaX, deltaY, allow);
+        actions.push({ kind: 'signature-move', before, after });
       }
       if (actions.length) {
         record({ description: targets.length > 1 ? `Move ${targets.length} items` : 'Move item', actions });

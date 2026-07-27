@@ -41,6 +41,7 @@ self.onmessage = async (event: MessageEvent<WorkerRequest>) => {
       case 'search': payload = engine.search(request.query); break;
       case 'editText': payload = await engine.editText(request.request); break;
       case 'moveText': payload = engine.moveText(request.request); break;
+      case 'moveTexts': payload = engine.moveTexts(request.request); break;
       case 'applyContentDelta': engine.applyContentDelta(request.delta, request.useAfter); payload = null; break;
       case 'inspectSignatures': payload = engine.inspectSignatures(request.page); break;
       case 'addSignature': payload = engine.addSignature(request.placement); break;

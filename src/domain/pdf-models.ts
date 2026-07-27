@@ -89,6 +89,19 @@ export interface TextMoveRequest {
   allowInvalidateDigitalSignatures?: boolean;
 }
 
+export interface TextMoveOperation {
+  originalText: string;
+  occurrenceIndex?: number;
+}
+
+export interface TextMovesRequest {
+  page: number;
+  moves: TextMoveOperation[];
+  deltaX: number;
+  deltaY: number;
+  allowInvalidateDigitalSignatures?: boolean;
+}
+
 export interface TextMoveResult {
   changed: boolean;
   message: string;
