@@ -1,0 +1,10 @@
+PDF Edit Web licensing gate
+
+This Phase 0 feasibility slice is not yet cleared for public deployment.
+MuPDF.js and its bundled WebAssembly binary are available under the
+AGPL-3.0-or-later license or a commercial Artifex license. The project must
+choose and document one of those paths before a production GitHub Pages
+release. This notice does not grant a license to MuPDF.js.
+
+Application source remains MIT-licensed only after the MuPDF licensing path,
+source-distribution obligations, and third-party notices have been reviewed.
