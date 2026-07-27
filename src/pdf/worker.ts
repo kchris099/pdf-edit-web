@@ -7,7 +7,9 @@ const workerScope = self as unknown as { onmessage: unknown; postMessage: (messa
 // MuPDF.js resolves its WASM sibling relative to its generated module. A stable
 // public URL keeps this working in Vite dev, preview, and GitHub Pages workers.
 (globalThis as typeof globalThis & { $libmupdf_wasm_Module?: { locateFile: (name: string) => string } }).$libmupdf_wasm_Module = {
-  locateFile: (name: string) => new URL(`/${name}`, self.location.origin).href,
+  locateFile: (name: string) => import.meta.env.DEV
+    ? new URL(`/${name}`, self.location.origin).href
+    : new URL(`../${name}`, import.meta.url).href,
 };
 
 const { MuPdfEngine } = await import('./engine');
