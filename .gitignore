@@ -1,7 +1,0 @@
-node_modules/
-dist/
-coverage/
-.vite/
-*.local
-*.log
-IMPLEMENTATION_PLAN.md
