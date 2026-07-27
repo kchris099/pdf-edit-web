@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { moveTextInContentStream, moveTextInContentStreams, replaceTextInContentStream, replaceTextInContentStreamWithFont } from '../../src/pdf/content-stream/rewriter';
+import { moveTextInContentStream, moveTextInContentStreams, moveTextInContentStreamsBatch, replaceTextInContentStream, replaceTextInContentStreamWithFont } from '../../src/pdf/content-stream/rewriter';
 import { FontEncodingMap } from '../../src/pdf/font-encoding';
 
 describe('conservative content-stream rewriter', () => {
@@ -46,6 +46,16 @@ describe('conservative content-stream rewriter', () => {
     const output = new TextDecoder().decode(moved.content);
     expect(output).toContain('1 0 0 1 12 -4 cm\nBT');
     expect(output).toContain('ET\nQ');
+  });
+
+  it('converts page-space moves through a scaled and flipped graphics transform', () => {
+    const source = new TextEncoder().encode(
+      'q 0.5 0 0 -0.5 0 800 cm BT /F1 12 Tf 1 0 0 1 70 300 Tm (Scaled text) Tj ET Q',
+    );
+    const moved = moveTextInContentStream(source, 'Scaled text', 10, -4);
+
+    expect(moved.success).toBe(true);
+    expect(new TextDecoder().decode(moved.content)).toContain('1 0 0 1 20 8 cm\nBT');
   });
 
   it('preserves TJ letter tracking without inserting space glyphs', () => {
@@ -233,5 +243,40 @@ describe('conservative content-stream rewriter', () => {
     expect(new TextDecoder().decode(moved.contents[0])).toContain('1 0 0 1 8 -3 cm\nBT');
     expect(new TextDecoder().decode(moved.contents[1])).toContain('1 0 0 1 8 -3 cm\nBT');
     expect(new TextDecoder().decode(moved.contents[2])).not.toContain('1 0 0 1 8 -3 cm\nBT');
+  });
+
+  it('moves several selected lines in one content rewrite', () => {
+    const source = new TextEncoder().encode([
+      'q BT /F4 12 Tf 1 0 0 1 70 722 Tm [(First line)] TJ ET Q',
+      'q BT /F4 12 Tf 1 0 0 1 70 700 Tm [(Second line)] TJ ET Q',
+      'q BT /F4 12 Tf 1 0 0 1 70 678 Tm [(Third line)] TJ ET Q',
+    ].join('\n'));
+    const moved = moveTextInContentStreamsBatch([source], [
+      { originalText: 'First line' },
+      { originalText: 'Second line' },
+      { originalText: 'Third line' },
+    ], 8, -3);
+
+    expect(moved.success).toBe(true);
+    expect(new TextDecoder().decode(moved.contents[0]).match(/1 0 0 1 8 -3 cm\nBT/g)).toHaveLength(3);
+  });
+
+  it('moves long lines fragmented into many text-show operators efficiently', () => {
+    const lines = [
+      'Lead and manage product analytics in the Ad Marketplace team',
+      'for ad revenue by increasing and optimizing placements and coverage of ads',
+      'auction models, and reducing losses in ad delivery to end users',
+      'and delivered preliminary data analytics and AB test iterations for product development',
+      'Met or exceeded the goal of 10% increase in ad revenue and ad GMV',
+    ];
+    const source = new TextEncoder().encode(lines.map((line, lineIndex) => [
+      'BT /F1 12 Tf 1 0 0 1 70', `${700 - lineIndex * 20} Tm`,
+      ...[...line].map((character) => `(${character === ' ' ? ' ' : character}) Tj`),
+      'ET',
+    ].join(' ')).join('\n'));
+    const moved = moveTextInContentStreamsBatch([source], lines.map((originalText) => ({ originalText })), 8, -3);
+
+    expect(moved.success).toBe(true);
+    expect(new TextDecoder().decode(moved.contents[0]).match(/1 0 0 1 8 -3 cm\nBT/g)).toHaveLength(5);
   });
 });

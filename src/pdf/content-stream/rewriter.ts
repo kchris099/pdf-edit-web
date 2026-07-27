@@ -1,5 +1,6 @@
 import { encodeSimplePdfString, scanPdfTokens, type PdfToken } from '../../domain/pdf-tokenizer';
 import type { FontEncodingMap, FontEncodingMaps } from '../font-encoding';
+import type { TextMoveOperation } from '../../domain/pdf-models';
 
 export interface RewriteResult {
   success: boolean;
@@ -169,6 +170,7 @@ interface TextShow {
   strings: PdfToken[];
   text: string;
   origin?: { x: number; y: number };
+  ctm: PdfMatrix;
   streamIndex: number;
   fontResource?: string;
 }
@@ -183,6 +185,51 @@ const showOperators = new Set(['Tj', 'TJ', "'", '"']);
 const hardPositionOperators = new Set(['TD', 'T*', 'Do']);
 
 function tokenWord(token: PdfToken | undefined): string { return token ? bytesToText(token.raw) : ''; }
+
+interface PdfMatrix {
+  a: number;
+  b: number;
+  c: number;
+  d: number;
+  e: number;
+  f: number;
+}
+
+const identityMatrix: PdfMatrix = { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 };
+
+function multiplyMatrix(left: PdfMatrix, right: PdfMatrix): PdfMatrix {
+  return {
+    a: left.a * right.a + left.c * right.b,
+    b: left.b * right.a + left.d * right.b,
+    c: left.a * right.c + left.c * right.d,
+    d: left.b * right.c + left.d * right.d,
+    e: left.a * right.e + left.c * right.f + left.e,
+    f: left.b * right.e + left.d * right.f + left.f,
+  };
+}
+
+function inverseTransformVector(matrix: PdfMatrix, x: number, y: number): { x: number; y: number } {
+  const determinant = matrix.a * matrix.d - matrix.b * matrix.c;
+  if (!Number.isFinite(determinant) || Math.abs(determinant) < 1e-12) return { x, y };
+  return {
+    x: (matrix.d * x - matrix.c * y) / determinant,
+    y: (-matrix.b * x + matrix.a * y) / determinant,
+  };
+}
+
+// Operators which terminate the operand list while scanning for graphics
+// state changes. Font resource names such as /F4 are intentionally absent.
+const pdfOperators = new Set([
+  'b', 'B', 'BDC', 'BI', 'BMC', 'BT', 'BX', 'b*', 'B*', 'c', 'cm', 'CS', 'cs',
+  'd', 'Do', 'DP', 'EI', 'ET', 'EX', 'f', 'F', 'f*', 'G', 'g', 'gs', 'ID', 'j',
+  'J', 'K', 'k', 'l', 'm', 'M', 'MP', 'n', 'Q', 'q', 're', 'RG', 'rg', 'ri',
+  'S', 'SC', 'sc', 'SCN', 'scn', 'sh', 'T*', 'Tc', 'Td', 'TD', 'Tf', 'Tj', 'TJ',
+  'TL', 'Tm', 'Tr', 'Ts', 'Tw', 'Tz', 'W', 'W*', 'w', '"', "'",
+]);
+
+function isPdfOperator(token: PdfToken): boolean {
+  return token.kind === 'word' && pdfOperators.has(tokenWord(token));
+}
 
 function isStringToken(token: PdfToken | undefined): token is PdfToken & { decoded: string } {
   return Boolean(token && (token.kind === 'string' || token.kind === 'hex'));
@@ -206,18 +253,44 @@ function decodedTokenText(token: PdfToken, map?: FontEncodingMap): string {
 function textShows(tokens: PdfToken[], streamIndex: number, encodings?: FontEncodingMaps): TextShow[] {
   const shows: TextShow[] = [];
   let currentFont: string | undefined;
+  let ctm = { ...identityMatrix };
+  const graphicsStack: PdfMatrix[] = [];
+  const operands: PdfToken[] = [];
   for (let index = 0; index < tokens.length; index += 1) {
     const token = tokens[index];
-    if (tokenWord(token) === 'Tf') {
-      currentFont = tokenWord(tokens[index - 2]).replace(/^\//, '') || undefined;
+    const word = tokenWord(token);
+    if (word === 'q') {
+      graphicsStack.push({ ...ctm });
+      operands.length = 0;
       continue;
     }
-    if (tokenWord(token) !== '[') {
+    if (word === 'Q') {
+      ctm = graphicsStack.pop() ?? ctm;
+      operands.length = 0;
+      continue;
+    }
+    if (word === 'cm') {
+      const values = operands.slice(-6).map((value) => Number(tokenWord(value)));
+      if (values.length === 6 && values.every(Number.isFinite)) {
+        ctm = multiplyMatrix(ctm, {
+          a: values[0], b: values[1], c: values[2], d: values[3], e: values[4], f: values[5],
+        });
+      }
+      operands.length = 0;
+      continue;
+    }
+    if (isPdfOperator(token)) {
+      operands.length = 0;
+      if (word === 'Tf') currentFont = tokenWord(tokens[index - 2]).replace(/^\//, '') || undefined;
+      continue;
+    }
+    if (token.kind === 'number') operands.push(token);
+    if (word !== '[') {
       if (!isStringToken(token) || !showOperators.has(tokenWord(tokens[index + 1]))) continue;
       shows.push({
         start: token.start, end: tokens[index + 1].end, startToken: index, endToken: index + 1,
         strings: [token], text: decodedTokenText(token, currentFont ? encodings?.get(currentFont) : undefined),
-        origin: textOrigin(tokens, index), streamIndex, fontResource: currentFont,
+        origin: textOrigin(tokens, index), ctm: { ...ctm }, streamIndex, fontResource: currentFont,
       });
       continue;
     }
@@ -235,7 +308,7 @@ function textShows(tokens: PdfToken[], streamIndex: number, encodings?: FontEnco
     shows.push({
       start: token.start, end: tokens[close + 1].end, startToken: index, endToken: close + 1,
       strings, text: strings.map((value) => decodedTokenText(value, map)).join(''),
-      origin: textOrigin(tokens, index), streamIndex, fontResource: currentFont,
+      origin: textOrigin(tokens, index), ctm: { ...ctm }, streamIndex, fontResource: currentFont,
     });
     index = close + 1;
   }
@@ -268,56 +341,148 @@ function normalizedText(text: string): string { return text.replace(/\s+/g, ' ')
 
 function compactText(text: string): string { return text.replace(/\s/g, ''); }
 
-function inferredText(shows: TextShow[]): string {
-  return shows.reduce((result, show, index) => {
-    if (!index) return show.text;
-    const previous = shows[index - 1].text;
-    const left = previous[previous.length - 1];
-    const right = show.text[0];
-    const separator = left && right && !/\s/.test(left) && !/\s/.test(right) ? ' ' : '';
-    return `${result}${separator}${show.text}`;
-  }, '');
-}
-
-function matchesText(shows: TextShow[], originalText: string): boolean {
-  const raw = shows.map((show) => show.text).join('');
-  const inferred = inferredText(shows);
-  const expected = normalizedText(originalText);
-  const canIgnoreBoundaryWhitespace = originalText.trim() === originalText;
-  return raw === originalText
-    || inferred === originalText
-    || normalizedText(raw) === expected
-    || normalizedText(inferred) === expected
-    // Some producers use TJ positioning numbers instead of literal spaces;
-    // the structured-text layer still reports those as word-separated text.
-    || (canIgnoreBoundaryWhitespace && compactText(raw) === compactText(originalText))
-    || (canIgnoreBoundaryWhitespace && compactText(inferred) === compactText(originalText));
-}
-
 /**
  * Locate a visible line even when the PDF split it across several Tj/TJ
  * operators. This is common in exported menus, where each word or glyph can
  * be emitted as its own text-show operation.
  */
-function findTextMatchInStreams(contents: Uint8Array[], originalText: string, occurrenceIndex: number, encodings?: FontEncodingMaps): { match?: TextMatch; count: number; tokens: PdfToken[][] } {
-  const tokens = contents.map((content) => scanPdfTokens(content));
-  const shows = tokens.flatMap((streamTokens, streamIndex) => textShows(streamTokens, streamIndex, encodings));
+interface TextProjection { text: string; showIndexes: number[] }
+
+function projectionForShows(group: TextShow[], mode: 'raw' | 'inferred' | 'compact' | 'normalized'): TextProjection {
+  const characters: string[] = [];
+  const showIndexes: number[] = [];
+  const append = (value: string, showIndex: number) => {
+    for (const character of value) { characters.push(character); showIndexes.push(showIndex); }
+  };
+  if (mode === 'inferred') {
+    group.forEach((show, index) => {
+      if (index) {
+        const previous = group[index - 1].text;
+        const left = previous[previous.length - 1];
+        const right = show.text[0];
+        if (left && right && !/\s/.test(left) && !/\s/.test(right)) append(' ', index);
+      }
+      append(show.text, index);
+    });
+  } else {
+    group.forEach((show, index) => append(mode === 'compact' ? show.text.replace(/\s/g, '') : show.text, index));
+  }
+  if (mode !== 'normalized') return { text: characters.join(''), showIndexes };
+  const normalized: string[] = [];
+  const normalizedIndexes: number[] = [];
+  characters.forEach((character, index) => {
+    if (/\s/.test(character)) {
+      if (normalized[normalized.length - 1] === ' ') return;
+      normalized.push(' ');
+      normalizedIndexes.push(showIndexes[index]);
+      return;
+    }
+    normalized.push(character);
+    normalizedIndexes.push(showIndexes[index]);
+  });
+  return { text: normalized.join(''), showIndexes: normalizedIndexes };
+}
+
+function projectionMatches(projection: TextProjection, needle: string): Array<{ start: number; end: number }> {
+  if (!needle) return [];
+  const matches: Array<{ start: number; end: number }> = [];
+  let offset = 0;
+  while (offset < projection.text.length) {
+    const position = projection.text.indexOf(needle, offset);
+    if (position < 0) break;
+    const endPosition = position + needle.length;
+    const startsAtBoundary = position === 0 || projection.showIndexes[position] !== projection.showIndexes[position - 1];
+    const endsAtBoundary = endPosition === projection.text.length || projection.showIndexes[endPosition] !== projection.showIndexes[endPosition - 1];
+    if (startsAtBoundary && endsAtBoundary) {
+      matches.push({ start: projection.showIndexes[position], end: projection.showIndexes[endPosition - 1] });
+    }
+    offset = position + 1;
+  }
+  return matches;
+}
+
+function findTextMatchInTokenStreams(tokens: PdfToken[][], shows: TextShow[], originalText: string, occurrenceIndex: number): { match?: TextMatch; count: number } {
+  const groups: TextShow[][] = [];
+  for (const show of shows) {
+    const previousGroup = groups[groups.length - 1];
+    const previous = previousGroup?.[previousGroup.length - 1];
+    if (!previous || mayJoin(tokens[previous.streamIndex], previous, tokens[show.streamIndex], show)) groups.push([show]);
+    else previousGroup.push(show);
+  }
+  const expected = normalizedText(originalText);
+  const compactExpected = originalText.trim() === originalText ? compactText(originalText) : '';
   const mayIgnoreLeadingWhitespace = originalText.trimStart() === originalText;
   let count = 0;
-  for (let start = 0; start < shows.length; start += 1) {
-    // A trimmed UI run must not claim preceding layout-only text objects.
-    // Removing those objects would collapse independently positioned columns.
-    if (mayIgnoreLeadingWhitespace && !shows[start].text.trim()) continue;
-    for (let end = start; end < shows.length; end += 1) {
-      if (end > start && !mayJoin(tokens[shows[end - 1].streamIndex], shows[end - 1], tokens[shows[end].streamIndex], shows[end])) break;
-      const matchShows = shows.slice(start, end + 1);
-      if (matchesText(matchShows, originalText)) {
-        if (count++ === occurrenceIndex) return { match: { start: shows[start], end: shows[end], shows: matchShows }, count, tokens };
-        break;
+  for (const group of groups) {
+    const candidates = new Map<string, { start: number; end: number }>();
+    const projections: Array<[TextProjection, string]> = [
+      [projectionForShows(group, 'raw'), originalText],
+      [projectionForShows(group, 'inferred'), originalText],
+      [projectionForShows(group, 'normalized'), expected],
+    ];
+    if (compactExpected) projections.push([projectionForShows(group, 'compact'), compactExpected]);
+    for (const [projection, needle] of projections) {
+      for (const candidate of projectionMatches(projection, needle)) {
+        const key = `${candidate.start}:${candidate.end}`;
+        if (mayIgnoreLeadingWhitespace && !group[candidate.start].text.trim()) continue;
+        candidates.set(key, candidate);
+      }
+    }
+    for (const candidate of [...candidates.values()].sort((left, right) => left.start - right.start || left.end - right.end)) {
+      if (count++ === occurrenceIndex) {
+        const matchShows = group.slice(candidate.start, candidate.end + 1);
+        return { match: { start: matchShows[0], end: matchShows[matchShows.length - 1], shows: matchShows }, count };
       }
     }
   }
-  return { count, tokens };
+  return { count };
+}
+
+// Keep the permissive matcher as a fallback for unusual producer spacing or
+// encoding patterns that cannot be represented by the linear projections.
+function findTextMatchInTokenStreamsSlow(tokens: PdfToken[][], shows: TextShow[], originalText: string, occurrenceIndex: number): { match?: TextMatch; count: number } {
+  const mayIgnoreLeadingWhitespace = originalText.trimStart() === originalText;
+  const expected = normalizedText(originalText);
+  const compactExpected = originalText.trim() === originalText ? compactText(originalText) : '';
+  let count = 0;
+  for (let start = 0; start < shows.length; start += 1) {
+    if (mayIgnoreLeadingWhitespace && !shows[start].text.trim()) continue;
+    let raw = '';
+    let inferred = '';
+    let compact = '';
+    for (let end = start; end < shows.length; end += 1) {
+      if (end > start && !mayJoin(tokens[shows[end - 1].streamIndex], shows[end - 1], tokens[shows[end].streamIndex], shows[end])) break;
+      const current = shows[end].text;
+      raw += current;
+      if (end > start) {
+        const previous = shows[end - 1].text;
+        const left = previous[previous.length - 1];
+        const right = current[0];
+        if (left && right && !/\s/.test(left) && !/\s/.test(right)) inferred += ' ';
+      }
+      inferred += current;
+      compact += current.replace(/\s/g, '');
+      const normalizedMatch = (raw.length >= expected.length - 2 && raw.length <= expected.length + 8 && normalizedText(raw) === expected)
+        || (inferred.length >= expected.length - 2 && inferred.length <= expected.length + 8 && normalizedText(inferred) === expected);
+      if (raw === originalText || inferred === originalText || normalizedMatch || (compactExpected && compact === compactExpected)) {
+        if (count++ === occurrenceIndex) return { match: { start: shows[start], end: shows[end], shows: shows.slice(start, end + 1) }, count };
+        break;
+      }
+      if (raw.length > originalText.length + 8 && compact.length > compactExpected.length + 8) break;
+    }
+  }
+  return { count };
+}
+
+function locateTextMatch(tokens: PdfToken[][], shows: TextShow[], originalText: string, occurrenceIndex: number): { match?: TextMatch; count: number } {
+  const fast = findTextMatchInTokenStreams(tokens, shows, originalText, occurrenceIndex);
+  return fast.match ? fast : findTextMatchInTokenStreamsSlow(tokens, shows, originalText, occurrenceIndex);
+}
+
+function findTextMatchInStreams(contents: Uint8Array[], originalText: string, occurrenceIndex: number, encodings?: FontEncodingMaps): { match?: TextMatch; count: number; tokens: PdfToken[][] } {
+  const tokens = contents.map((content) => scanPdfTokens(content));
+  const shows = tokens.flatMap((streamTokens, streamIndex) => textShows(streamTokens, streamIndex, encodings));
+  return { ...locateTextMatch(tokens, shows, originalText, occurrenceIndex), tokens };
 }
 
 function findTextMatch(content: Uint8Array, originalText: string, occurrenceIndex: number, encodings?: FontEncodingMaps): { match?: TextMatch; count: number; tokens: PdfToken[][] } {
@@ -329,6 +494,24 @@ function replaceRange(content: Uint8Array, start: number, end: number, replaceme
   result.set(content.slice(0, start));
   result.set(replacement, start);
   result.set(content.slice(end), start + replacement.length);
+  return result;
+}
+
+interface ByteReplacement { start: number; end: number; value: Uint8Array }
+
+function applyByteReplacements(content: Uint8Array, replacements: ByteReplacement[]): Uint8Array {
+  const ordered = [...replacements].sort((left, right) => left.start - right.start || left.end - right.end);
+  const result = new Uint8Array(content.length + ordered.reduce((total, item) => total + item.value.length - (item.end - item.start), 0));
+  let sourceOffset = 0;
+  let outputOffset = 0;
+  for (const replacement of ordered) {
+    result.set(content.slice(sourceOffset, replacement.start), outputOffset);
+    outputOffset += replacement.start - sourceOffset;
+    result.set(replacement.value, outputOffset);
+    outputOffset += replacement.value.length;
+    sourceOffset = replacement.end;
+  }
+  result.set(content.slice(sourceOffset), outputOffset);
   return result;
 }
 
@@ -558,39 +741,50 @@ export function moveTextInContentStream(content: Uint8Array, originalText: strin
   return moveMatchedTextObjects(content, found.tokens[0], found.match.shows, deltaX, deltaY, found.count);
 }
 
-function moveMatchedTextObjects(content: Uint8Array, tokens: PdfToken[], matchedShows: TextShow[], deltaX: number, deltaY: number, matchCount: number): RewriteResult {
+function textObjects(tokens: PdfToken[]): Array<{ start: number; end: number }> {
+  const objects: Array<{ start: number; end: number }> = [];
+  let start = -1;
+  for (const token of tokens) {
+    if (tokenWord(token) === 'BT') start = token.start;
+    else if (tokenWord(token) === 'ET' && start >= 0) {
+      objects.push({ start, end: token.end });
+      start = -1;
+    }
+  }
+  return objects;
+}
+
+function moveInsertionReplacements(
+  tokens: PdfToken[],
+  matchedShows: TextShow[],
+  deltaX: number,
+  deltaY: number,
+  objects = textObjects(tokens),
+): ByteReplacement[] {
+  if (!matchedShows.length) return [];
   const number = (value: number) => Number.isFinite(value) ? String(Number(value.toFixed(4))) : '0';
-  const prefix = encoder.encode(`q\n1 0 0 1 ${number(deltaX)} ${number(deltaY)} cm\n`);
+  const local = inverseTransformVector(matchedShows[0].ctm, deltaX, deltaY);
+  const prefix = encoder.encode(`q\n1 0 0 1 ${number(local.x)} ${number(local.y)} cm\n`);
   const suffix = encoder.encode('\nQ');
   const startOffset = Math.min(...matchedShows.map((show) => show.start));
   const endOffset = Math.max(...matchedShows.map((show) => show.end));
-  const objects: Array<{ start: number; end: number }> = [];
-  for (let index = 0; index < tokens.length; index += 1) {
-    if (tokenWord(tokens[index]) !== 'BT') continue;
-    const endToken = tokens.slice(index + 1).find((token) => tokenWord(token) === 'ET');
-    if (!endToken) continue;
-    const end = endToken.end;
-    if (tokens[index].start < endOffset && end > startOffset) objects.push({ start: tokens[index].start, end });
-  }
+  return objects
+    .filter((object) => object.start < endOffset && object.end > startOffset)
+    .flatMap((object) => [
+      { start: object.start, end: object.start, value: prefix },
+      { start: object.end, end: object.end, value: suffix },
+    ]);
+}
 
-  if (!objects.length) return { success: false, content, message: 'The selected text has no movable text object.', missingCodePoints: [], matchCount };
+function moveMatchedTextObjects(content: Uint8Array, tokens: PdfToken[], matchedShows: TextShow[], deltaX: number, deltaY: number, matchCount: number): RewriteResult {
+  const replacements = moveInsertionReplacements(tokens, matchedShows, deltaX, deltaY);
+
+  if (!replacements.length) return { success: false, content, message: 'The selected text has no movable text object.', missingCodePoints: [], matchCount };
 
   // A menu line can span several BT…ET objects. Each object has its own
   // internal Q, so a single outer transform would be restored after the first
   // fragment. Wrap every matched text object independently instead.
-  let result = content;
-  for (const object of [...objects].reverse()) {
-    const withSuffix = new Uint8Array(result.length + suffix.length);
-    withSuffix.set(result.slice(0, object.end), 0);
-    withSuffix.set(suffix, object.end);
-    withSuffix.set(result.slice(object.end), object.end + suffix.length);
-    const withPrefix = new Uint8Array(withSuffix.length + prefix.length);
-    withPrefix.set(withSuffix.slice(0, object.start), 0);
-    withPrefix.set(prefix, object.start);
-    withPrefix.set(withSuffix.slice(object.start), object.start + prefix.length);
-    result = withPrefix;
-  }
-  return { success: true, content: result, message: 'Moved the selected text cluster.', missingCodePoints: [] };
+  return { success: true, content: applyByteReplacements(content, replacements), message: 'Moved the selected text cluster.', missingCodePoints: [] };
 }
 
 export interface MultiStreamMoveResult {
@@ -599,6 +793,43 @@ export interface MultiStreamMoveResult {
   message: string;
   missingCodePoints: number[];
   matchCount?: number;
+}
+
+/** Move several logical text lines while parsing and updating the page once. */
+export function moveTextInContentStreamsBatch(
+  contents: Uint8Array[],
+  requests: TextMoveOperation[],
+  deltaX: number,
+  deltaY: number,
+  encodings?: FontEncodingMaps,
+): MultiStreamMoveResult {
+  if (!requests.length) return { success: false, contents, message: 'No text clusters were selected to move.', missingCodePoints: [] };
+  const tokens = contents.map((content) => scanPdfTokens(content));
+  const shows = tokens.flatMap((streamTokens, streamIndex) => textShows(streamTokens, streamIndex, encodings));
+  const objects = tokens.map((streamTokens) => textObjects(streamTokens));
+  const matches = requests.map((request) => locateTextMatch(
+    tokens,
+    shows,
+    request.originalText,
+    Math.max(0, request.occurrenceIndex ?? 0),
+  ));
+  if (matches.some((found) => !found.match)) {
+    return { success: false, contents, message: 'The selected text was not found in the page content streams.', missingCodePoints: [] };
+  }
+
+  const moved = contents.map((content, streamIndex) => {
+    const replacements = new Map<string, ByteReplacement>();
+    for (const found of matches) {
+      const matchedShows = found.match!.shows.filter((show) => show.streamIndex === streamIndex);
+      for (const replacement of moveInsertionReplacements(tokens[streamIndex], matchedShows, deltaX, deltaY, objects[streamIndex])) {
+        // Multiple selected runs can share one BT...ET object. One wrapper is
+        // sufficient and avoids applying the same move twice.
+        replacements.set(`${replacement.start}:${replacement.end}`, replacement);
+      }
+    }
+    return replacements.size ? applyByteReplacements(content, [...replacements.values()]) : content;
+  });
+  return { success: true, contents: moved, message: 'Moved the selected text clusters.', missingCodePoints: [] };
 }
 
 /** Move a logical text line even when its PDF objects live in several page streams. */

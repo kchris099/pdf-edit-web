@@ -1,4 +1,4 @@
-import type { ContentStreamDelta, PdfDocumentInfo, PdfEngineErrorShape, PdfPageInfo, RenderedPage, SearchHit, SignatureDelta, SignaturePlacement, TextEditRequest, TextEditResult, TextMoveRequest, TextMoveResult, TextRun } from '../domain/pdf-models';
+import type { ContentStreamDelta, PdfDocumentInfo, PdfEngineErrorShape, PdfPageInfo, RenderedPage, SearchHit, SignatureDelta, SignaturePlacement, TextEditRequest, TextEditResult, TextMoveRequest, TextMoveResult, TextMovesRequest, TextRun } from '../domain/pdf-models';
 import type { WorkerRequest, WorkerRequestBody, WorkerResponse } from './protocol';
 
 export class PdfWorkerError extends Error {
@@ -56,6 +56,7 @@ export class PdfWorkerClient {
   search(query: string): Promise<SearchHit[]> { return this.call({ type: 'search', query }); }
   editText(request: TextEditRequest): Promise<TextEditResult> { return this.call({ type: 'editText', request }); }
   moveText(request: TextMoveRequest): Promise<TextMoveResult> { return this.call({ type: 'moveText', request }); }
+  moveTexts(request: TextMovesRequest): Promise<TextMoveResult> { return this.call({ type: 'moveTexts', request }); }
   applyContentDelta(delta: ContentStreamDelta, useAfter: boolean): Promise<null> { return this.call({ type: 'applyContentDelta', delta, useAfter }); }
   inspectSignatures(page: number): Promise<SignatureDelta[]> { return this.call({ type: 'inspectSignatures', page }); }
   addSignature(placement: SignaturePlacement): Promise<SignatureDelta> { return this.call({ type: 'addSignature', placement }); }
